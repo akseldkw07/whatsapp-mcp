@@ -1,0 +1,12 @@
+# Fork-local tool settings for files outside whatsapp-mcp-server/ (see docs/FORK.md).
+# Not a Python project: the server's own pyproject.toml lives in whatsapp-mcp-server/.
+
+# The shared pre-commit hooks run black from the repo root. Keep it in step with ruff
+# (whatsapp-mcp-server/pyproject.toml), also when a commit mixes files from both folders.
+[tool.black]
+line-length = 120
+
+[tool.pyright]
+venvPath = "whatsapp-mcp-server"
+venv = ".venv"
+extraPaths = ["whatsapp-mcp-server"]
