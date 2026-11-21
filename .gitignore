@@ -9,7 +9,7 @@ claude_desktop_config.json
 
 # Claude Code local settings (per-user)
 .claude/settings.local.json
-.claude/tdd-guard/
+**/.claude/tdd-guard/
 
 # OS files
 .DS_Store

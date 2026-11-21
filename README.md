@@ -143,6 +143,12 @@ Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
 
 Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
 
+Every tool declares the four MCP annotation hints, so clients can ask for approval where it
+matters: the read tools are read-only and local; `download_media`, `view_media` and
+`transcribe_audio` write only to this machine; `send_reaction` is a reversible write;
+`send_message`, `send_file`, `send_audio_message` and `mark_messages_read` are marked
+destructive, because a sent message or read receipt cannot be taken back.
+
 ### Contact Operations
 
 #### `search_contacts`
