@@ -31,6 +31,8 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.15",
+    # Reports test results to the tdd-guard Claude Code plugin (fork-local).
+    "tdd-guard-pytest>=0.1",
 ]
 
 [project.urls]
@@ -61,6 +63,10 @@ ignore = [
     "E501",  # line too long (handled by formatter)
 ]
 
+# Fork-local: the shared pre-commit hooks run black; keep it in step with ruff.
+[tool.black]
+line-length = 120
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -69,3 +75,6 @@ indent-style = "space"
 testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
+# Fork-local: tdd-guard reads results from <root>/.claude/tdd-guard/data/test.json, where the
+# root is the folder Claude Code was started in. Elsewhere (CI) it falls back to the repo.
+tdd_guard_project_root = "/Users/Akseldkw/coding/mcp"
