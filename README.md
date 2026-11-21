@@ -1,5 +1,7 @@
 # WhatsApp MCP Server
 
+> This is the `akseldkw07` fork, set up as a personal local server. Fork-specific setup, hooks and deploy are in [`docs/FORK.md`](./docs/FORK.md); open fork work is in [`docs/TODO.md`](./docs/TODO.md).
+
 [![CI](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/verygoodplugins/whatsapp-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
