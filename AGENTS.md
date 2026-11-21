@@ -4,6 +4,8 @@ Guidance for AI coding agents (Claude Code, Cursor, Codex, etc.) and for human c
 
 This file is the single source of truth for "how to contribute here". `CLAUDE.md` exists for tooling that looks for that filename and points to this file.
 
+> **In the akseldkw07 fork:** read [`docs/FORK.md`](./docs/FORK.md) first. Here `origin` is `akseldkw07/whatsapp-mcp`, PRs and issues stay in the fork (never upstream), and PRs are opened with `gitpush`. Where this file and `docs/FORK.md` disagree, `docs/FORK.md` wins.
+
 ## Repository
 
 - **Repo:** [`verygoodplugins/whatsapp-mcp`](https://github.com/verygoodplugins/whatsapp-mcp)

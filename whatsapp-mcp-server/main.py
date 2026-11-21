@@ -5,6 +5,7 @@ import tempfile
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
 import media_preview
@@ -65,6 +66,17 @@ from whatsapp import (
 # so importing this module never parses env vars or exits the process.
 mcp = FastMCP("whatsapp")
 
+# Tool annotation presets. All four hints are always set, so a client can tell a local read
+# from a send and ask for approval where it matters.
+#   READ_LOCAL   reads the local store only
+#   WRITE_LOCAL  stores a file or transcript on this machine only
+#   WRITE        changes something others see, reversibly (a reaction can be removed)
+#   DESTRUCTIVE  outward-facing and irreversible: sends, read receipts
+READ_LOCAL = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+WRITE_LOCAL = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
+
 PreviewDimension = Annotated[
     int,
     Field(
@@ -76,7 +88,7 @@ PreviewDimension = Annotated[
 ]
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
 
@@ -87,7 +99,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     return contacts
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def get_contact(
     identifier: str | None = None,
     phone_number: str | None = None,
@@ -178,7 +190,7 @@ def get_contact(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def list_messages(
     after: str | None = None,
     before: str | None = None,
@@ -228,7 +240,7 @@ def list_messages(
     return messages
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def list_chats(
     query: str | None = None,
     limit: int = 50,
@@ -262,7 +274,7 @@ def list_chats(
     return chats
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
 
@@ -274,10 +286,10 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
         Chat dictionary — same shape as list_chats, including last_read_time and unread.
     """
     chat = whatsapp_get_chat(chat_jid, include_last_message)
-    return chat
+    return chat  # pyright: ignore[reportReturnType]
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
 
@@ -285,10 +297,10 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
         sender_phone_number: The phone number to search for
     """
     chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
-    return chat
+    return chat  # pyright: ignore[reportReturnType]
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
 
@@ -303,7 +315,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
     return chats
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def get_last_interaction(jid: str) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
 
@@ -317,7 +329,7 @@ def get_last_interaction(jid: str) -> dict[str, Any]:
     return message if message else {}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
 
@@ -334,7 +346,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def send_message(
     recipient: str,
     message: str,
@@ -374,7 +386,7 @@ def send_message(
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE)
 def send_reaction(
     recipient: str,
     message_id: str,
@@ -400,7 +412,7 @@ def send_reaction(
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def mark_messages_read(
     message_ids: list[str],
     chat_jid: str,
@@ -425,7 +437,7 @@ def mark_messages_read(
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
@@ -449,7 +461,7 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, A
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
 
@@ -465,7 +477,7 @@ def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     return {"success": success, "message": status_message}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_LOCAL)
 def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
 
@@ -484,7 +496,7 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
         return {"success": False, "message": "Failed to download media"}
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_LOCAL)
 def view_media(
     message_id: str,
     chat_jid: str,
@@ -525,7 +537,7 @@ def view_media(
     return Image(data=data, format=image_format)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_LOCAL)
 def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dict[str, Any]:
     """Transcribe a WhatsApp voice note and return its text.
 
@@ -624,4 +636,4 @@ if __name__ == "__main__":
 
     if transport == "stdio":
         install_stdio_parent_watchdog("WHATSAPP_PARENT_WATCHDOG_S", parent_pid=parent_pid)
-    mcp.run(transport=transport)
+    mcp.run(transport=transport)  # pyright: ignore[reportArgumentType]
