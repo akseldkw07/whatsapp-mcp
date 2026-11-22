@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +20,15 @@ func writeFile(t *testing.T, dir, name, content string) string {
 		t.Fatalf("write %s: %v", p, err)
 	}
 	return p
+}
+
+// helper: allow-list entries for dirs, as resolveMediaRoots would build them.
+func rootsOf(dirs ...string) []mediaRoot {
+	roots := make([]mediaRoot, 0, len(dirs))
+	for _, dir := range dirs {
+		roots = append(roots, newMediaRoot(dir))
+	}
+	return roots
 }
 
 func TestPathHasPrefix(t *testing.T) {
@@ -47,24 +60,127 @@ func TestValidateMediaPathAcceptsFileInsideRoot(t *testing.T) {
 	}
 	f := writeFile(t, root, "ok.txt", "hello")
 
-	got, err := validateMediaPath(f, []string{resolvedRoot})
+	got, err := validateMediaPath(f, rootsOf(root))
 	if err != nil {
 		t.Fatalf("expected accept, got error: %v", err)
 	}
 	resolvedFile, _ := filepath.EvalSymlinks(f)
-	if got != resolvedFile {
-		t.Fatalf("expected resolved path %q, got %q", resolvedFile, got)
+	if got.path != resolvedFile {
+		t.Fatalf("expected resolved path %q, got %q", resolvedFile, got.path)
+	}
+
+	// The canonical spelling of the same file is accepted too (macOS: /var
+	// is a symlink to /private/var, and t.TempDir() hands out the former).
+	if _, err := validateMediaPath(filepath.Join(resolvedRoot, "ok.txt"), rootsOf(root)); err != nil {
+		t.Fatalf("expected canonical spelling to be accepted, got error: %v", err)
 	}
 }
 
 func TestValidateMediaPathRejectsOutsideRoot(t *testing.T) {
 	root := t.TempDir()
-	resolvedRoot, _ := filepath.EvalSymlinks(root)
 	other := t.TempDir()
 	f := writeFile(t, other, "elsewhere.txt", "nope")
 
-	if _, err := validateMediaPath(f, []string{resolvedRoot}); err == nil {
+	if _, err := validateMediaPath(f, rootsOf(root)); err == nil {
 		t.Fatal("expected error for path outside root, got nil")
+	}
+}
+
+// A caller must not be able to learn whether a file outside the roots
+// exists: a missing path and an existing file get the identical error, and
+// the error names neither.
+func TestValidateMediaPathOutsideRootIsNotAnExistenceOracle(t *testing.T) {
+	root := t.TempDir()
+	other := t.TempDir()
+	existing := writeFile(t, other, "elsewhere.txt", "nope")
+	missing := filepath.Join(other, "no-such-file.txt")
+
+	_, existingErr := validateMediaPath(existing, rootsOf(root))
+	_, missingErr := validateMediaPath(missing, rootsOf(root))
+	if existingErr == nil || missingErr == nil {
+		t.Fatalf("expected both rejected, got existing=%v missing=%v", existingErr, missingErr)
+	}
+	if existingErr.Error() != missingErr.Error() {
+		t.Fatalf("errors differ, which reveals existence:\n existing: %v\n missing:  %v", existingErr, missingErr)
+	}
+	if !errors.Is(existingErr, errMediaPathOutsideRoots) || !errors.Is(missingErr, errMediaPathOutsideRoots) {
+		t.Fatalf("expected errMediaPathOutsideRoots, got existing=%v missing=%v", existingErr, missingErr)
+	}
+	if strings.Contains(existingErr.Error(), other) {
+		t.Fatalf("error echoes the rejected path: %v", existingErr)
+	}
+}
+
+func TestValidateMediaPathRejectsDotDotEscape(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "outbox")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, parent, "secret", "PRETEND-SECRET")
+
+	escape := root + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "secret"
+	if _, err := validateMediaPath(escape, rootsOf(root)); !errors.Is(err, errMediaPathOutsideRoots) {
+		t.Fatalf("expected errMediaPathOutsideRoots for %q, got: %v", escape, err)
+	}
+}
+
+func TestValidateMediaPathRejectsSiblingWithSharedPrefix(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "x")
+	sibling := filepath.Join(parent, "xy")
+	for _, dir := range []string{root, sibling} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	f := writeFile(t, sibling, "file", "nope")
+
+	if _, err := validateMediaPath(f, rootsOf(root)); !errors.Is(err, errMediaPathOutsideRoots) {
+		t.Fatalf("root %q must not accept %q, got: %v", root, f, err)
+	}
+}
+
+func TestValidateMediaPathAcceptsFileUnderSymlinkedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows; covered by Unix CI")
+	}
+	parent := t.TempDir()
+	realDir := filepath.Join(parent, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	linkRoot := filepath.Join(parent, "outbox")
+	if err := os.Symlink(realDir, linkRoot); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	writeFile(t, realDir, "ok.txt", "hello")
+	want, _ := filepath.EvalSymlinks(filepath.Join(realDir, "ok.txt"))
+
+	// Addressed through the configured (symlinked) root and by its canonical
+	// path: both are the same allowed file.
+	for _, in := range []string{filepath.Join(linkRoot, "ok.txt"), want} {
+		got, err := validateMediaPath(in, rootsOf(linkRoot))
+		if err != nil {
+			t.Fatalf("expected %q to be accepted, got error: %v", in, err)
+		}
+		if got.path != want {
+			t.Fatalf("validateMediaPath(%q) = %q, want %q", in, got.path, want)
+		}
+	}
+}
+
+func TestValidateMediaPathKeepsErrorsForPathsInsideRoot(t *testing.T) {
+	root := t.TempDir()
+
+	_, err := validateMediaPath(filepath.Join(root, "missing.txt"), rootsOf(root))
+	if err == nil || errors.Is(err, errMediaPathOutsideRoots) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected the not-exist error for a missing file inside the root, got: %v", err)
+	}
+
+	_, err = validateMediaPath(root, rootsOf(root))
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("expected a not-a-regular-file error for the root itself, got: %v", err)
 	}
 }
 
@@ -73,7 +189,6 @@ func TestValidateMediaPathRejectsSymlinkEscape(t *testing.T) {
 		t.Skip("symlink semantics differ on Windows; covered by Unix CI")
 	}
 	root := t.TempDir()
-	resolvedRoot, _ := filepath.EvalSymlinks(root)
 	secrets := t.TempDir()
 	target := writeFile(t, secrets, "id_rsa", "PRETEND-PRIVATE-KEY")
 
@@ -83,28 +198,33 @@ func TestValidateMediaPathRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	if _, err := validateMediaPath(link, []string{resolvedRoot}); err == nil {
+	_, err := validateMediaPath(link, rootsOf(root))
+	if err == nil {
 		t.Fatal("expected symlink escape to be rejected, got nil error")
-	} else if !strings.Contains(err.Error(), "outside the configured media roots") {
+	} else if !errors.Is(err, errMediaPathOutsideRoots) {
 		t.Fatalf("expected confinement error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), secrets) {
+		t.Fatalf("error echoes where the symlink points: %v", err)
 	}
 }
 
 func TestValidateMediaPathRejectsRelative(t *testing.T) {
-	if _, err := validateMediaPath("not/absolute.txt", []string{"/tmp"}); err == nil {
+	if _, err := validateMediaPath("not/absolute.txt", rootsOf("/tmp")); err == nil {
 		t.Fatal("expected error for relative path")
 	}
 }
 
 func TestValidateMediaPathRejectsDirectory(t *testing.T) {
 	root := t.TempDir()
-	resolvedRoot, _ := filepath.EvalSymlinks(root)
 	subdir := filepath.Join(root, "sub")
 	if err := os.Mkdir(subdir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if _, err := validateMediaPath(subdir, []string{resolvedRoot}); err == nil {
+	if _, err := validateMediaPath(subdir, rootsOf(root)); err == nil {
 		t.Fatal("expected error for directory, got nil")
+	} else if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("expected a not-a-regular-file error, got: %v", err)
 	}
 }
 
@@ -126,6 +246,67 @@ func TestResolveMediaRootsAcceptsEnvList(t *testing.T) {
 	}
 	if len(roots) != 2 {
 		t.Fatalf("expected 2 roots, got %d", len(roots))
+	}
+}
+
+// Each root keeps the spelling it was configured with next to its
+// symlink-resolved form, so a request may use either.
+func TestResolveMediaRootsKeepsConfiguredAndCanonicalForms(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows; covered by Unix CI")
+	}
+	parent := t.TempDir()
+	realDir := filepath.Join(parent, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	linkRoot := filepath.Join(parent, "outbox")
+	if err := os.Symlink(realDir, linkRoot); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Setenv("WHATSAPP_MEDIA_ROOTS", linkRoot+string(os.PathSeparator))
+
+	roots, err := resolveMediaRoots()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantCanonical, _ := filepath.EvalSymlinks(realDir)
+	if len(roots) != 1 || roots[0].configured != linkRoot || roots[0].canonical != wantCanonical {
+		t.Fatalf("roots = %+v, want configured %q and canonical %q", roots, linkRoot, wantCanonical)
+	}
+}
+
+// /api/send answers a media_path outside the roots the same way whether or
+// not the file exists, and never reaches the send path.
+func TestSendHandler_MediaPathOutsideRoots_UniformRejection(t *testing.T) {
+	const token = "supersecrettoken1234567890abcdef"
+	root := t.TempDir()
+	other := t.TempDir()
+	existing := writeFile(t, other, "elsewhere.txt", "nope")
+	missing := filepath.Join(other, "no-such-file.txt")
+	handler := newRESTMux(newTestClient(&mockLIDStore{}), newTestMessageStore(t), 8080, token, rootsOf(root))
+
+	bodies := map[string]string{}
+	for name, mediaPath := range map[string]string{"existing": existing, "missing": missing} {
+		payload, err := json.Marshal(map[string]string{"recipient": "15551234567", "media_path": mediaPath})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/send", strings.NewReader(string(payload)))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		handler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusForbidden {
+			t.Fatalf("%s: expected 403, got %d (%s)", name, resp.Code, resp.Body.String())
+		}
+		bodies[name] = resp.Body.String()
+	}
+	if bodies["existing"] != bodies["missing"] {
+		t.Fatalf("responses differ, which reveals existence:\n existing: %s\n missing:  %s", bodies["existing"], bodies["missing"])
+	}
+	if !strings.Contains(bodies["existing"], errMediaPathOutsideRoots.Error()) {
+		t.Fatalf("expected the confinement error in the response, got: %s", bodies["existing"])
 	}
 }
 

@@ -564,6 +564,8 @@ Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+A path outside the roots is rejected before the bridge looks at the filesystem,
+with the same error whether or not the file exists.
 
 ### Connection status and phone linking
 

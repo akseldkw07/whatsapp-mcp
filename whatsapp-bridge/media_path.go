@@ -13,8 +13,12 @@ package main
 // Default: ~/.local/share/whatsapp-mcp/outbox (created on first use).
 // Override: colon-separated absolute paths in WHATSAPP_MEDIA_ROOTS.
 //
-// Symlinks are resolved before the prefix check, so dropping a symlink
-// inside outbox/ that points at /etc/passwd does not bypass the guard.
+// The check runs twice. First lexically, on the cleaned request path,
+// before any filesystem call: a path outside the roots is rejected without
+// being looked at, with one fixed error, so the endpoint cannot be used to
+// probe which files exist. Then again after symlinks are resolved, so
+// dropping a symlink inside outbox/ that points at /etc/passwd does not
+// bypass the guard.
 
 import (
 	"errors"
@@ -30,13 +34,57 @@ import (
 // out of the way of unrelated tools.
 const defaultOutboxSubpath = ".local/share/whatsapp-mcp/outbox"
 
+// errMediaPathOutsideRoots is the one answer for every media_path that is
+// not inside an allowed root, whether it fails the lexical check or only
+// the check after symlink resolution. It deliberately carries no path and
+// no filesystem error: anything more would tell the caller whether a file
+// outside the roots exists.
+var errMediaPathOutsideRoots = errors.New(
+	"media_path is not inside an allowed media root " +
+		"(set WHATSAPP_MEDIA_ROOTS to allow more directories)",
+)
+
+// mediaRoot is one allowed directory, in the two spellings a request may
+// use for it: as configured, and with symlinks resolved. They differ when
+// the root is, or sits below, a symlink (macOS: /var -> /private/var).
+type mediaRoot struct {
+	configured string // absolute and cleaned, as configured
+	canonical  string // configured with symlinks resolved
+}
+
+func (r mediaRoot) String() string {
+	if r.configured == r.canonical {
+		return r.configured
+	}
+	return r.configured + " (-> " + r.canonical + ")"
+}
+
+// newMediaRoot builds the allow-list entry for an absolute directory path.
+func newMediaRoot(dir string) mediaRoot {
+	configured := filepath.Clean(dir)
+	canonical, err := canonicalizePath(configured)
+	if err != nil {
+		canonical = configured
+	}
+	return mediaRoot{configured: configured, canonical: canonical}
+}
+
+// validatedMediaPath is an outbound media path that validateMediaPath has
+// confined to the allowed roots. sendWhatsAppMessage takes this type rather
+// than a string so a request path cannot reach os.ReadFile unchecked.
+// The zero value means "no media". Only validateMediaPath may fill in path.
+type validatedMediaPath struct {
+	path string // canonical (symlink-resolved) path of a regular file, or ""
+}
+
 // resolveMediaRoots returns the list of allowed absolute root directories
-// for outbound media. Roots are resolved via filepath.EvalSymlinks where
-// possible so a later prefix check is meaningful even if the user pointed
-// the env var at a symlinked location.
-func resolveMediaRoots() ([]string, error) {
+// for outbound media. Each root keeps its configured spelling and, where
+// the directory exists, its filepath.EvalSymlinks form, so the prefix
+// checks are meaningful even if the user pointed the env var at a
+// symlinked location.
+func resolveMediaRoots() ([]mediaRoot, error) {
 	if env := strings.TrimSpace(os.Getenv("WHATSAPP_MEDIA_ROOTS")); env != "" {
-		var roots []string
+		var roots []mediaRoot
 		for _, raw := range strings.Split(env, string(os.PathListSeparator)) {
 			raw = strings.TrimSpace(raw)
 			if raw == "" {
@@ -45,11 +93,7 @@ func resolveMediaRoots() ([]string, error) {
 			if !filepath.IsAbs(raw) {
 				return nil, fmt.Errorf("WHATSAPP_MEDIA_ROOTS entries must be absolute paths, got %q", raw)
 			}
-			resolved, err := canonicalizePath(raw)
-			if err != nil {
-				return nil, fmt.Errorf("resolve %q: %w", raw, err)
-			}
-			roots = append(roots, resolved)
+			roots = append(roots, newMediaRoot(raw))
 		}
 		if len(roots) == 0 {
 			return nil, errors.New("WHATSAPP_MEDIA_ROOTS is set but contains no valid entries")
@@ -65,11 +109,7 @@ func resolveMediaRoots() ([]string, error) {
 	if mkErr := os.MkdirAll(def, 0o700); mkErr != nil {
 		return nil, fmt.Errorf("create default outbox %q: %w", def, mkErr)
 	}
-	resolved, err := canonicalizePath(def)
-	if err != nil {
-		return nil, fmt.Errorf("resolve default outbox: %w", err)
-	}
-	return []string{resolved}, nil
+	return []mediaRoot{newMediaRoot(def)}, nil
 }
 
 // canonicalizePath returns an absolute, symlink-resolved path. EvalSymlinks
@@ -91,40 +131,74 @@ func canonicalizePath(p string) (string, error) {
 }
 
 // validateMediaPath checks whether mediaPath points at a regular file
-// inside one of the allowed roots. Returns the canonical path on success
-// so callers read from the resolved file (defends against TOCTOU between
-// validation and ReadFile in degenerate cases).
-func validateMediaPath(mediaPath string, allowedRoots []string) (string, error) {
+// inside one of the allowed roots. On success the result holds the
+// canonical path, so callers read from the resolved file (defends against
+// TOCTOU between validation and ReadFile in degenerate cases).
+//
+// Nothing here touches the filesystem until the cleaned path has passed
+// the lexical prefix check below. Keep that check inline: it is what makes
+// "outside the roots" indistinguishable for existing and missing files,
+// and what static analysis recognizes as the sanitizer for the path.
+func validateMediaPath(mediaPath string, allowedRoots []mediaRoot) (validatedMediaPath, error) {
 	if mediaPath == "" {
-		return "", errors.New("media_path is empty")
+		return validatedMediaPath{}, errors.New("media_path is empty")
 	}
 	if !filepath.IsAbs(mediaPath) {
-		return "", fmt.Errorf("media_path must be absolute, got %q", mediaPath)
+		return validatedMediaPath{}, fmt.Errorf("media_path must be absolute, got %q", mediaPath)
 	}
 
-	resolved, err := filepath.EvalSymlinks(mediaPath)
+	// Clean folds "." and ".." away, so <root>/../secret is compared as
+	// what it names, not as something that merely starts with <root>.
+	p := filepath.Clean(mediaPath)
+	sep := string(os.PathSeparator)
+
+	for _, root := range allowedRoots {
+		for _, dir := range []string{root.configured, root.canonical} {
+			if p == dir {
+				// A root is a directory. Say so without a filesystem call.
+				return validatedMediaPath{}, fmt.Errorf("media_path is not a regular file: %q", p)
+			}
+			// The trailing separator is what stops root /tmp/x from
+			// accepting /tmp/xy/file.
+			if strings.HasPrefix(p, strings.TrimSuffix(dir, sep)+sep) {
+				return resolveMediaPathInRoots(p, allowedRoots)
+			}
+		}
+	}
+	return validatedMediaPath{}, errMediaPathOutsideRoots
+}
+
+// resolveMediaPathInRoots finishes validation for a cleaned path that is
+// lexically inside an allowed root (validateMediaPath is the only caller):
+// it resolves symlinks, requires the result to still be inside a root, and
+// requires a regular file. Errors about a path inside a root keep their
+// filesystem cause; a symlink leading out of the roots gets the same fixed
+// error as any other outside path.
+func resolveMediaPathInRoots(p string, allowedRoots []mediaRoot) (validatedMediaPath, error) {
+	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return "", fmt.Errorf("resolve media_path: %w", err)
+		return validatedMediaPath{}, fmt.Errorf("resolve media_path: %w", err)
+	}
+
+	contained := false
+	for _, root := range allowedRoots {
+		if pathHasPrefix(resolved, root.canonical) {
+			contained = true
+			break
+		}
+	}
+	if !contained {
+		return validatedMediaPath{}, errMediaPathOutsideRoots
 	}
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return "", fmt.Errorf("stat media_path: %w", err)
+		return validatedMediaPath{}, fmt.Errorf("stat media_path: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("media_path is not a regular file: %q", resolved)
+		return validatedMediaPath{}, fmt.Errorf("media_path is not a regular file: %q", resolved)
 	}
-
-	for _, root := range allowedRoots {
-		if pathHasPrefix(resolved, root) {
-			return resolved, nil
-		}
-	}
-	return "", fmt.Errorf(
-		"media_path %q is outside the configured media roots; "+
-			"set WHATSAPP_MEDIA_ROOTS to allow additional directories",
-		resolved,
-	)
+	return validatedMediaPath{path: resolved}, nil
 }
 
 // pathHasPrefix returns true when child is the same path as parent, or a
