@@ -198,7 +198,7 @@ func NewMessageStore() (*MessageStore, error) {
 			ephemeral_expiration INTEGER NOT NULL DEFAULT 0,
 			ephemeral_setting_timestamp INTEGER NOT NULL DEFAULT 0
 		);
-		
+
 		CREATE TABLE IF NOT EXISTS messages (
 			id TEXT,
 			chat_jid TEXT,
@@ -1536,10 +1536,14 @@ func resolveMentionJIDs(client *whatsmeow.Client, mentions []string) []string {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, media validatedMediaPath, quotedMsgID string, quotedSenderJID string, quotedContent string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
+
+	// Canonical path of a file inside the allowed media roots, or "" for a
+	// text-only message. validatedMediaPath only comes from validateMediaPath.
+	mediaPath := media.path
 
 	mentionedJIDs := resolveMentionJIDs(client, mentions)
 
@@ -2501,7 +2505,7 @@ func extractDirectPathFromURL(url string) string {
 // Outbound media: req.MediaPath in /api/send is validated against
 // allowedMediaRoots before sendWhatsAppMessage ever sees it. See
 // media_path.go.
-func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string, connections ...*connectionManager) *http.ServeMux {
+func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []mediaRoot, connections ...*connectionManager) *http.ServeMux {
 	allowedHosts := buildAllowedHosts(port)
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return withAuth(token, allowedHosts, h)
@@ -2568,9 +2572,9 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 		// Validate and canonicalize media_path against the configured roots
 		// before reading. This prevents the bridge from being used as a
 		// generic file-read primitive (e.g. media_path=/Users/x/.ssh/id_rsa).
-		resolvedMediaPath := req.MediaPath
+		var media validatedMediaPath
 		if req.MediaPath != "" {
-			canonical, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
+			validated, mpErr := validateMediaPath(req.MediaPath, allowedMediaRoots)
 			if mpErr != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
@@ -2580,16 +2584,16 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 				})
 				return
 			}
-			resolvedMediaPath = canonical
+			media = validated
 		}
 
 		// Avoid logging req.Message verbatim — it's user content and may
 		// contain secrets the user pasted into a chat.
 		fmt.Printf("→ /api/send recipient=%q message_len=%d has_media=%v\n",
-			req.Recipient, len(req.Message), resolvedMediaPath != "")
+			req.Recipient, len(req.Message), media.path != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, resolvedMediaPath, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, media, req.QuotedMessageID, req.QuotedSenderJID, req.QuotedContent, req.Mentions)
 		fmt.Printf("← /api/send success=%v status=%q\n", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -2912,7 +2916,7 @@ func newRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, 
 
 // Requests use the current client after a revoked device is replaced. Existing
 // in-flight requests can finish against the already disconnected previous client.
-func newManagedRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string, connection *connectionManager) http.Handler {
+func newManagedRESTMux(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []mediaRoot, connection *connectionManager) http.Handler {
 	var cacheMu sync.Mutex
 	cachedClient := client
 	cachedMux := newRESTMux(client, messageStore, port, token, allowedMediaRoots, connection)
@@ -2928,7 +2932,7 @@ func newManagedRESTMux(client *whatsmeow.Client, messageStore *MessageStore, por
 		handler.ServeHTTP(w, r)
 	})
 }
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []string, connection *connectionManager) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, token string, allowedMediaRoots []mediaRoot, connection *connectionManager) {
 	handler := newManagedRESTMux(client, messageStore, port, token, allowedMediaRoots, connection)
 
 	// Start the server with proper timeouts. Bind to loopback so the bridge is

@@ -15,6 +15,7 @@ logs or phone numbers.
 | `whatsapp-mcp-server/pyproject.toml` | `[tool.black] line-length` matches ruff's; `tdd-guard-pytest` and `tdd_guard_project_root` report test runs to the tdd-guard Claude Code plugin. |
 | `pyproject.toml` (root) | Tool settings only, for files outside `whatsapp-mcp-server/`: black's line length and pyright's path to the server's `.venv`. |
 | `whatsapp-mcp-server/main.py` | Every tool carries the four MCP annotation hints (upstream has none); `tests/test_tool_annotations.py` fails when a tool is added without being classified. Sends and read receipts are marked destructive, so Claude Desktop asks before each one. |
+| `whatsapp-bridge/media_path.go` | `media_path` in `/api/send` is checked against the allowed roots before any filesystem call, and every path outside them gets one fixed error, so the endpoint can't be used to probe which files exist. `sendWhatsAppMessage` only takes a path that went through that check. Upstream resolves and stats the path first. |
 | `docs/TODO.md` | Open fork-local work. |
 
 ## Setup on a new machine
